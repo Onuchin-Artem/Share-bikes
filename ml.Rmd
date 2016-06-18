@@ -1,0 +1,91 @@
+---
+title: "Bike sharing forecasting"
+output: html_document
+---
+
+```{r,results='hide', message=FALSE}
+library(forecast)
+library(tseries)
+library(lmtest)
+library(zoo)
+```
+
+Read the data:
+
+```{r}
+data <- read.csv("train.csv", sep=",", stringsAsFactors=F)
+xname <- "Bike sharing forecasting"
+
+data$datetime <- as.POSIXlt(data$datetime, format="%Y-%m-%d %H:%M:%S")
+
+str(data)
+```
+
+
+Whatch when time series starts and ends:
+
+```{r}
+head(data$datetime, n=1)
+tail(data$datetime, n=1)
+```
+
+Lets visualize 2 month sample:
+
+```{r}
+sample1 <- head(data, n=(410 ))
+tail(sample1$datetime, n=1)
+sampleSeries1 <- zoo(sample1$count, sample1$datetime)
+str(sampleSeries1)
+
+
+tsdisplay(sampleSeries1)
+
+
+tSeries <-ts(sampleSeries1, frequency=24)
+trainend <- as.POSIXlt('2011-01-15 00:00:00', format="%Y-%m-%d %H:%M:%S")
+start <- as.POSIXlt('2011-01-01 00:00:00', format="%Y-%m-%d %H:%M:%S")
+
+start(sampleSeries1)
+
+trainSeries <- ts(window(sampleSeries1[,1],start=start, end=trainend), frequency=24)
+
+testSeries <- ts(window(sampleSeries1[,1], start=trainend), frequency=24) 
+D <- length(testSeries)
+
+plot(trainSeries)
+
+
+fourier <- function(t,terms,period)
+{
+  n <- length(t)
+  X <- matrix(,nrow=n,ncol=2*terms)
+  for(i in 1:terms)
+  {
+    X[,2*i-1] <- sin(2*pi*i*t/period)
+    X[,2*i] <- cos(2*pi*i*t/period)
+  }
+  colnames(X) <- paste(c("S","C"),rep(1:terms,rep(2,terms)),sep="")
+  return(X)
+}
+
+LambdaOpt <- BoxCox.lambda(tSeries)
+
+LambdaOpt
+
+aa <- Arima(trainSeries, order = c(0, 0L, 24),
+      seasonal = list(order = c(0L, 1, 7), period = 24))
+aa
+
+fc1 <- forecast(aa, h=D)
+
+accuracy(fc1, testSeries)
+
+plot(fc1, ylab=xname, xlab="Year")
+lines(tSeries, col="black")
+
+res1 <- trainSeries - fc1$fitted
+
+```
+
+
+
