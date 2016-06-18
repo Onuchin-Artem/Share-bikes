@@ -19,27 +19,30 @@ set.seed(42)
 Read the data
 -------------
 ```{r, message=F, warning=F}
-train = fread("./train.csv", header = T, sep = ",", integer64 = "numeric")
-test = fread("./test.csv", header = T, sep = ",", integer64 = "numeric")
+train = fread("./prepared_train.csv", header = T, sep = ",", integer64 = "numeric")
+validate = fread("./prepared_validate.csv", header = T, sep = ",", integer64 = "numeric")
+test = fread("./prepared_test.csv", header = T, sep = ",", integer64 = "numeric")
 
+test2 = fread("./test.csv", header = T, sep = ",", integer64 = "numeric")
 ```
 
 Change type to categorical variables
 ------------------------------------
 ```{r}
-train = train %>% mutate(
+fix_types = function(data) {
+  data %>% mutate(
+  month = as.character(month),
+  day = as.character(day),
+  weekday = as.character(weekday),
+  hour = as.character(hour),
   season = as.character(season),
   holiday = as.character(holiday),
   workingday = as.character(workingday),
-  weather = as.character(weather)
-)
-
-test = test %>% mutate(
-  season = as.character(season),
-  holiday = as.character(holiday),
-  workingday = as.character(workingday),
-  weather = as.character(weather)
-)
+  weather = as.character(weather))
+}
+train = fix_types(train)
+validate = fix_types(validate)
+test = fix_types(test)
 
 ```
 
@@ -47,19 +50,27 @@ Prepare features
 ----------------
 ```{r, echo=FALSE}
 
-dummy = dummyVars(~ season + holiday + workingday + weather, data = train)
-
+dummy = dummyVars(~ season + holiday + workingday + weather + month + weekday + hour,
+                  data = train,
+                  fullRank = T,
+                  levelsOnly = T)
+names = names(predict(dummy, train) %>% as.data.frame())
+data = validate
 prepare_dataset_features = function(data) {
-  categorical_data = predict(dummy, data)
+  categorical_data = predict(dummy, data) %>% as.data.frame()
+  Missing <- setdiff(names, names(categorical_data))  # Find names of missing columns
+  categorical_data[Missing] <- 0                    # Add them, filled with '0's
+  categorical_data <- categorical_data[names]
   numeric_data = data %>% select(c(temp, atemp, humidity, windspeed))
   prepared_data = cbind(categorical_data, numeric_data)
   as.matrix(prepared_data)
 }
 
 train_matrix = prepare_dataset_features(train)
+validate_matrix = prepare_dataset_features(validate)
 
 test_matrix = prepare_dataset_features(test)
-
+full_train_matrix = rbind2(train_matrix, validate_matrix)
 ```
 
 Prepare target
@@ -67,6 +78,10 @@ Prepare target
 We going to predict log(Y+1) to optimize the target cost function
 ```{r}
 preparedTrainTarget = log(train$count + 1)
+preparedValidateTarget = log(validate$count + 1)
+preparedFullTarget =c(preparedTrainTarget, preparedValidateTarget)
+
+
 
 ```
 
@@ -76,21 +91,45 @@ Xgboost train and cross-validate
 dtrain <- xgb.DMatrix(train_matrix, label = preparedTrainTarget)
 
 model = xgboost(dtrain, nround=100, nthread = 2, nfold = 5, metrics=list("rmse"),
-                  max.depth =3, eta = 0.1, objective = "reg:linear", print.every.n = 25)
-history <- xgb.cv(data = dtrain, nround=100, nthread = 2, nfold = 5, metrics=list("rmse"),
-                  max.depth =3, eta = 0.1, objective = "reg:linear", print.every.n = 25)
+                  max.depth = 3, eta = 0.1, objective = "reg:linear", print.every.n = 33)
+history <- xgb.cv(data = dtrain, nround=150, nthread = 2, nfold = 5, metrics=list("rmse"),
+                  max.depth = 3, eta = 0.1, objective = "reg:linear", print.every.n = 33)
 print(tail(history))
 ```
-Predict and un-log count
+Validate Score
 ------------------------
 ```{r}
-predictions = predict(model, test_matrix)
+validate_predictions = predict(model, validate_matrix)
+RMSE(validate_predictions, preparedValidateTarget)
+
+```
+
+Train on full dataset
+------------------------
+```{r}
+dtrain_final <- xgb.DMatrix(full_train_matrix, label = preparedFullTarget)
+
+model_final = xgboost(dtrain_final, nround=100, nthread = 2, nfold = 5, metrics=list("rmse"),
+                  max.depth = 3, eta = 0.1, objective = "reg:linear", print.every.n = 33)
+
+history <- xgb.cv(data = dtrain_final, nround=100, nthread = 2, nfold = 5, metrics=list("rmse"),
+                  max.depth = 3, eta = 0.1, objective = "reg:linear", print.every.n = 33)
+
+```
+
+
+Predict and un-log predictions
+------------------------------
+
+```{r}
+predictions = predict(model_final, test_matrix)
 fixed_predictions = exp(predictions) - 1
 ```
+
 Write the result
 ----------------
 ```{r}
-result = cbind(test$datetime, fixed_predictions) %>% as.data.frame()
+result = cbind(test2$datetime, fixed_predictions) %>% as.data.frame()
 names(result) = c('datetime', 'count')
 write.csv(result, 'submission.csv', quote = F, row.names = F)
 ```
