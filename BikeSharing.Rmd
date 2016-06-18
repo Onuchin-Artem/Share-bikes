@@ -7,11 +7,10 @@ Load default libraries
 ```{r, message=F, warning=F}
 library(data.table)
 library(dplyr)
-library(tm)
+library(lubridate)
 library(ggplot2)
 library(caret)
 library(stringi)
-library(FeatureHashing)
 library(xgboost)
 theme_set(theme_bw())
 set.seed(42)
@@ -19,30 +18,32 @@ set.seed(42)
 Read the data
 -------------
 ```{r, message=F, warning=F}
-train = fread("./prepared_train.csv", header = T, sep = ",", integer64 = "numeric")
-validate = fread("./prepared_validate.csv", header = T, sep = ",", integer64 = "numeric")
-test = fread("./prepared_test.csv", header = T, sep = ",", integer64 = "numeric")
-
-test2 = fread("./test.csv", header = T, sep = ",", integer64 = "numeric")
+full_train = fread("./train.csv", header = T, sep = ",", integer64 = "numeric")
+test = fread("./test.csv", header = T, sep = ",", integer64 = "numeric")
 ```
 
 Change type to categorical variables
 ------------------------------------
 ```{r}
 fix_types = function(data) {
-  data %>% mutate(
-  month = as.character(month),
-  day = as.character(day),
-  weekday = as.character(weekday),
-  hour = as.character(hour),
-  season = as.character(season),
-  holiday = as.character(holiday),
-  workingday = as.character(workingday),
-  weather = as.character(weather))
+  data %>% 
+    mutate(
+      datetime = ymd_hms(datetime),
+      workingday = as.character(workingday),
+      weather = as.character(weather)) %>%
+    mutate(
+      year = as.character(year(datetime)),
+      month = as.character(month(datetime)),
+      day = as.character(mday(datetime)),
+      wday = as.character(wday(datetime)),
+      hour = as.character(hour(datetime)))
+  
 }
-train = fix_types(train)
-validate = fix_types(validate)
+full_train = fix_types(full_train)
 test = fix_types(test)
+
+train = full_train[as.integer(full_train$day) < 13]
+validate = full_train[as.integer(full_train$day) >= 13]
 
 ```
 
@@ -50,27 +51,69 @@ Prepare features
 ----------------
 ```{r, echo=FALSE}
 
-dummy = dummyVars(~ season + holiday + workingday + weather + month + weekday + hour,
+dummy = dummyVars(~ workingday + weather + month + wday + hour + year,
                   data = train,
                   fullRank = T,
                   levelsOnly = T)
+
+summarise_stats = function(groups) {
+  groups %>% summarise(
+    avg_count = mean(count),
+    casual_ratio1 = sum(casual) / sum(count),
+    casual_ratio2 = mean(casual / count))
+}
+
+stats_names = c('avg_count', 'count5', 'count95', 'avg_casual', 'casual5', 'casual95', 'avg_registered', 
+                'registered5', 'registered95', 'casual_ratio1', 'casual_ratio2')
+
+train_hour_statistics = train %>% group_by(hour) %>% summarise_stats()
+full_train_hour_statistics = full_train %>% group_by(hour) %>% summarise_stats()
+train_wday_statistics = train %>% group_by(wday) %>% summarise_stats()
+full_train_wday_statistics = full_train %>% group_by(wday) %>% summarise_stats()
+train_month_statistics = train %>% group_by(month) %>% summarise_stats()
+full_train_month_statistics = full_train %>% group_by(month) %>% summarise_stats()
+
+
 names = names(predict(dummy, train) %>% as.data.frame())
-data = validate
-prepare_dataset_features = function(data) {
+prepare_dataset_features = function(data, hour_statistics, wday_statistics, month_statistics) {
   categorical_data = predict(dummy, data) %>% as.data.frame()
-  Missing <- setdiff(names, names(categorical_data))  # Find names of missing columns
-  categorical_data[Missing] <- 0                    # Add them, filled with '0's
-  categorical_data <- categorical_data[names]
+  Missing = setdiff(names, names(categorical_data))  # Find names of missing columns
+  categorical_data[Missing] = 0                    # Add them, filled with '0's
+  categorical_data = categorical_data[names]
   numeric_data = data %>% select(c(temp, atemp, humidity, windspeed))
-  prepared_data = cbind(categorical_data, numeric_data)
+  hour_stats_data = inner_join(data, hour_statistics, by="hour") %>%
+    select(avg_count:casual_ratio2)
+  wday_stats_data = inner_join(data, wday_statistics, by="wday") %>%
+    select(avg_count:casual_ratio2)
+  month_stats_data = inner_join(data, month_statistics, by="month") %>%
+    select(avg_count:casual_ratio2)
+
+  prepared_data = cbind(
+    categorical_data,
+    numeric_data,
+    hour_stats_data,
+    wday_stats_data,
+    month_stats_data)
   as.matrix(prepared_data)
 }
 
-train_matrix = prepare_dataset_features(train)
-validate_matrix = prepare_dataset_features(validate)
+train_matrix = prepare_dataset_features(train, 
+                                        train_hour_statistics, 
+                                        train_wday_statistics, 
+                                        train_month_statistics)
+validate_matrix = prepare_dataset_features(validate, 
+                                           train_hour_statistics, 
+                                           train_wday_statistics, 
+                                           train_month_statistics)
 
-test_matrix = prepare_dataset_features(test)
-full_train_matrix = rbind2(train_matrix, validate_matrix)
+test_matrix = prepare_dataset_features(test,
+                                       full_train_hour_statistics, 
+                                       full_train_wday_statistics, 
+                                       full_train_month_statistics)
+full_train_matrix = prepare_dataset_features(full_train,
+                                             full_train_hour_statistics, 
+                                             full_train_wday_statistics,
+                                             full_train_month_statistics)
 ```
 
 Prepare target
@@ -79,22 +122,26 @@ We going to predict log(Y+1) to optimize the target cost function
 ```{r}
 preparedTrainTarget = log(train$count + 1)
 preparedValidateTarget = log(validate$count + 1)
-preparedFullTarget =c(preparedTrainTarget, preparedValidateTarget)
-
-
+preparedFullTarget =log(full_train$count + 1)
 
 ```
 
 Xgboost train and cross-validate
 --------------------------------
+Interesting link: [how to tune hyperparameters](http://www.slideshare.net/odsc/owen-zhangopen-sourcetoolsanddscompetitions1)
 ```{r}
 dtrain <- xgb.DMatrix(train_matrix, label = preparedTrainTarget)
 
-model = xgboost(dtrain, nround=100, nthread = 2, nfold = 5, metrics=list("rmse"),
-                  max.depth = 3, eta = 0.1, objective = "reg:linear", print.every.n = 33)
-history <- xgb.cv(data = dtrain, nround=150, nthread = 2, nfold = 5, metrics=list("rmse"),
-                  max.depth = 3, eta = 0.1, objective = "reg:linear", print.every.n = 33)
+xgbControl = list(
+   subsample=0.5, colsample_bytree = 0.7, metrics=list("rmse"), min_child_weight = 30,
+                  max.depth = 6, eta = 0.1, alpha = 2, lambda = 20, objective = "reg:linear"
+)
+model = xgboost(params = xgbControl, data = dtrain, 
+                nround=200, nthread = 2, print.every.n = 33)
+history <- xgb.cv(params = xgbControl, data = dtrain, 
+                  nround=200, nthread = 2, nfold = 5, print.every.n = 33)
 print(tail(history))
+
 ```
 Validate Score
 ------------------------
@@ -104,16 +151,23 @@ RMSE(validate_predictions, preparedValidateTarget)
 
 ```
 
+Feature importance
+------------------
+```{r}
+imp = xgb.importance(colnames(train_matrix), model = model)
+xgb.plot.importance(imp)
+
+```
 Train on full dataset
 ------------------------
 ```{r}
 dtrain_final <- xgb.DMatrix(full_train_matrix, label = preparedFullTarget)
 
-model_final = xgboost(dtrain_final, nround=100, nthread = 2, nfold = 5, metrics=list("rmse"),
-                  max.depth = 3, eta = 0.1, objective = "reg:linear", print.every.n = 33)
+model_final = xgboost(params = xgbControl, data = dtrain_final, 
+                      nround=200, nthread = 2, print.every.n = 33)
 
-history <- xgb.cv(data = dtrain_final, nround=100, nthread = 2, nfold = 5, metrics=list("rmse"),
-                  max.depth = 3, eta = 0.1, objective = "reg:linear", print.every.n = 33)
+history <- xgb.cv(params = xgbControl, data = dtrain_final, 
+                  nround=200, nthread = 2, print.every.n = 33, nfold = 5)
 
 ```
 
@@ -129,7 +183,7 @@ fixed_predictions = exp(predictions) - 1
 Write the result
 ----------------
 ```{r}
-result = cbind(test2$datetime, fixed_predictions) %>% as.data.frame()
+result = cbind(as.character(test$datetime), fixed_predictions) %>% as.data.frame()
 names(result) = c('datetime', 'count')
 write.csv(result, 'submission.csv', quote = F, row.names = F)
 ```
