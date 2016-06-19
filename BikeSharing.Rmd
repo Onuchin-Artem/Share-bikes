@@ -12,6 +12,7 @@ library(ggplot2)
 library(caret)
 library(stringi)
 library(xgboost)
+library(reshape2)
 theme_set(theme_bw())
 set.seed(42)
 ```
@@ -58,13 +59,10 @@ dummy = dummyVars(~ workingday + weather + month + wday + hour + year,
 
 summarise_stats = function(groups) {
   groups %>% summarise(
-    avg_count = mean(count),
+    avg_count = median(as.double(count)),
     casual_ratio1 = sum(casual) / sum(count),
     casual_ratio2 = mean(casual / count))
 }
-
-stats_names = c('avg_count', 'count5', 'count95', 'avg_casual', 'casual5', 'casual95', 'avg_registered', 
-                'registered5', 'registered95', 'casual_ratio1', 'casual_ratio2')
 
 train_hour_statistics = train %>% group_by(hour) %>% summarise_stats()
 full_train_hour_statistics = full_train %>% group_by(hour) %>% summarise_stats()
@@ -80,7 +78,7 @@ prepare_dataset_features = function(data, hour_statistics, wday_statistics, mont
   Missing = setdiff(names, names(categorical_data))  # Find names of missing columns
   categorical_data[Missing] = 0                    # Add them, filled with '0's
   categorical_data = categorical_data[names]
-  numeric_data = data %>% select(c(temp, atemp, humidity, windspeed))
+  numeric_data = data %>% transmute(temp, atemp - temp, humidity, windspeed)
   hour_stats_data = inner_join(data, hour_statistics, by="hour") %>%
     select(avg_count:casual_ratio2)
   wday_stats_data = inner_join(data, wday_statistics, by="wday") %>%
@@ -133,13 +131,13 @@ Interesting link: [how to tune hyperparameters](http://www.slideshare.net/odsc/o
 dtrain <- xgb.DMatrix(train_matrix, label = preparedTrainTarget)
 
 xgbControl = list(
-   subsample=0.5, colsample_bytree = 0.7, metrics=list("rmse"), min_child_weight = 30,
-                  max.depth = 6, eta = 0.1, alpha = 2, lambda = 20, objective = "reg:linear"
+   subsample=0.8, colsample_bytree = 0.8, metrics=list("rmse"), gamma = 0.9,
+                  max.depth = 6, eta = 0.1, alpha = 1, lambda = 1, objective = "reg:linear"
 )
 model = xgboost(params = xgbControl, data = dtrain, 
-                nround=200, nthread = 2, print.every.n = 33)
+                nround=2000, nthread = 4, print.every.n = 500)
 history <- xgb.cv(params = xgbControl, data = dtrain, 
-                  nround=200, nthread = 2, nfold = 5, print.every.n = 33)
+                  nround=2000, nthread = 4, nfold = 10, print.every.n = 500)
 print(tail(history))
 
 ```
@@ -150,24 +148,52 @@ validate_predictions = predict(model, validate_matrix)
 RMSE(validate_predictions, preparedValidateTarget)
 
 ```
+Plot learning curve
+-------------------
+```{r}
+plot_learning_curve = function(learning_curves) {
+  learning_curves_train = NULL
+  learning_curves_train$dataset = 'train'
+  learning_curves_train$rmse = learning_curves$train.rmse.mean
+  learning_curves_train$rmse.se = learning_curves$train.rmse.std
+  learning_curves_train$iterations = 1:nrow(learning_curves)
+  learning_curves_test = NULL
+  learning_curves_test$dataset = 'test'
+  learning_curves_test$rmse = learning_curves$test.rmse.mean
+  learning_curves_test$rmse.se = learning_curves$test.rmse.std
+  learning_curves_test$iterations = 1:nrow(learning_curves)
+  learning_curves_prepared = rbind(as.data.frame(learning_curves_train), as.data.frame(learning_curves_test))
+  ggplot(data = learning_curves_prepared,
+         mapping = aes(x=iterations, y=rmse, group = dataset, colour=dataset)) +
+    geom_errorbar(aes(ymin=rmse-2*rmse.se, ymax=rmse+2*rmse.se), width=.01, alpha=0.02) +
+    geom_line() + coord_cartesian(ylim = c(0.3, 0.7))
+
+}
+
+plot_learning_curve(history)
+```
 
 Feature importance
 ------------------
 ```{r}
 imp = xgb.importance(colnames(train_matrix), model = model)
+```
+
+```{r, fig.width=4, fig.height=7}
 xgb.plot.importance(imp)
 
 ```
+
 Train on full dataset
 ------------------------
 ```{r}
 dtrain_final <- xgb.DMatrix(full_train_matrix, label = preparedFullTarget)
 
 model_final = xgboost(params = xgbControl, data = dtrain_final, 
-                      nround=200, nthread = 2, print.every.n = 33)
+                      nround=2000, nthread = 4, print.every.n = 500)
 
 history <- xgb.cv(params = xgbControl, data = dtrain_final, 
-                  nround=200, nthread = 2, print.every.n = 33, nfold = 5)
+                  nround=2000, nthread = 4, print.every.n = 500, nfold = 10)
 
 ```
 
