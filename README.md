@@ -3,7 +3,7 @@ Share-bikes
 
 This is a [solution](https://github.com/Onuchin-Artem/Share-bikes/blob/master/BikeSharing.pdf) to Kaggle "Bike Sharing Demand" challenge.
 
-This model is relatively simple as it uses no composition if we treat xgboost as one algorithm.
+This model is relatively simple as it uses no composition if we treat xgboost as a single algorithm.
 
 It has score 0.39180.
 
