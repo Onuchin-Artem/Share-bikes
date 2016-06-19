@@ -30,19 +30,20 @@ fix_types = function(data) {
   data %>% 
     mutate(
       datetime = ymd_hms(datetime),
-      workingday = as.character(workingday),
-      weather = as.character(weather)) %>%
+      workingday = 1 - workingday,
+      weather = weather) %>%
     mutate(
-      year = as.character(year(datetime)),
-      month = as.character(month(datetime)),
+      year = year(datetime),
+      month = month(datetime),
       day = as.character(mday(datetime)),
-      wday = as.character(wday(datetime)),
-      hour = as.character(hour(datetime)),
+      wday = wday(datetime),
+      hour = hour(datetime),
       hour4 = as.character(round(hour(datetime) / 4)),
+      hour3 = as.character(round(hour(datetime) / 3)),
+      hour6 = as.character(round(hour(datetime) / 6)),
       hour8 = as.character(round((hour(datetime) - 4) / 8)),
-      hour12 = as.character(round((hour(datetime)) / 12))
-      )
-  
+      hour12 = as.character(round((hour(datetime)) / 12)),
+      month2  = as.character(round((month(datetime)) / 2)))
 }
 full_train = fix_types(full_train)
 test = fix_types(test)
@@ -56,7 +57,12 @@ Prepare features
 ----------------
 ```{r, echo=FALSE}
 
-dummy = dummyVars(~ workingday + season + weather + wday + hour + year + hour4 + hour8 + hour12,
+dummy = dummyVars(~ workingday + season + weather + wday + hour + 
+                    year + hour4 + hour8 + hour12 + hour3 + hour6 + holiday + 
+                    workingday * hour4 + workingday * hour8 + workingday * hour12 + 
+                    workingday * hour3 + workingday * hour6 +
+                    holiday * hour4 + holiday * hour8 + holiday * hour12 + 
+                    holiday * hour3 + holiday * hour6,
                   data = train,
                   fullRank = T,
                   levelsOnly = T)
@@ -136,7 +142,7 @@ dtrain <- xgb.DMatrix(train_matrix, label = preparedTrainTarget)
 
 xgbControl = list(
    subsample=0.8, colsample_bytree = 0.8, metrics=list("rmse"), gamma = 0.9,
-                  max.depth = 6, eta = 0.1, alpha = 1, lambda = 1, objective = "reg:linear"
+                  max.depth = 6, eta = 0.11, alpha = 1, lambda = 1, objective = "reg:linear"
 )
 model = xgboost(params = xgbControl, data = dtrain, 
                 nround=2000, nthread = 4, print.every.n = 500)
@@ -186,7 +192,7 @@ Feature importance
 imp = xgb.importance(colnames(train_matrix), model = model)
 ```
 
-```{r, fig.width=4, fig.height=7}
+```{r, fig.width=7, fig.height=10}
 xgb.plot.importance(imp)
 
 ```
