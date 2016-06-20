@@ -55,7 +55,7 @@ validate = full_train[as.integer(full_train$day) >= 13]
 
 Prepare features
 ----------------
-```{r, echo=FALSE}
+```{r}
 
 dummy = dummyVars(~ workingday + season + weather + wday + hour + 
                     year + hour4 + hour8 + hour12 + hour3 + hour6 + holiday + 
